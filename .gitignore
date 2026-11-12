@@ -1,0 +1,13 @@
+# 解包后的工作树 + 原版 asar / Info.plist 备份（约 580 MB，还原时本地重新 sync 生成）
+.work/
+
+# 旧版（松散目录时代）备份，已不再使用
+backup/
+
+# 翻译文件的本地时间戳备份
+zh-Hans-final.json.bak-*
+
+# Python / macOS 杂项
+__pycache__/
+*.pyc
+.DS_Store

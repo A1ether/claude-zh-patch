@@ -1,0 +1,9 @@
+{
+  "8pV1VCvSE6": "{done, number} / {total, plural, one {# 个会话} other {# 个会话}}已完成…",
+  "Ks/RxpWrqp": "{partnerName} 优惠：立减 {percentOff}%，持续 {months, plural, one {# 个月} other {# 个月}}",
+  "PjpoKim/G9": "{branch} 上有 {count, plural, one {# 个未提交文件} other {# 个未提交文件}}",
+  "UD71a0dTe5": "请输入我们发送至 {hasEmail, select, true {<b>{maskedEmail}</b>} other {你的邮箱}} 的 {codeLength} 位验证码。",
+  "X9YCIEhPuo": "在 {section} 中显示 {count, plural, one {# 个更多匹配项} other {# 个更多匹配项}}",
+  "eLxkmBsNP/": "{done, number} / {total, plural, one {# 个步骤} other {# 个步骤}}已完成",
+  "y1mwE7xKRQ": "立减 {percentOff}%，持续 {months, plural, one {# 个月} other {# 个月}}。输入你的工作邮箱即可开始——我们会向你发送登录链接。"
+}
