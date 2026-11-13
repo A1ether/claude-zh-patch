@@ -5,12 +5,33 @@
 
 ![图形界面](docs/screenshot.jpg)
 
+## 下载即用（Release）
+
+不想碰命令行的话，直接从 [Releases](https://github.com/A1ether/claude-zh-patch/releases)
+下载 `ClaudeHans-<版本>.zip`：
+
+1. 解压，把 `ClaudeHans.app` 拖进「应用程序」
+2. 首次打开：**右键 →「打开」**（未做 Apple 公证，双击会被拦一次），或先执行
+   `xattr -dr com.apple.quarantine /Applications/ClaudeHans.app`
+3. 点「一键汉化」。系统会问「ClaudeHans 想修改其他 App」，允许即可
+4. Claude 启动后：左下角账户 →「语言」→ 选「中文（简体）」
+
+release 包里**已经内置汉化引擎**（脚本 + 翻译数据），不需要 clone 仓库。唯一的系统依赖是
+Python ≥ 3.9 —— macOS 自带的 `python3` 或 `xcode-select --install` 装上的那个就够了；
+找不到时界面会直接给出安装命令和复制按钮。
+
+> 内置引擎首次启动会复制到 `~/Library/Application Support/claude-zh-patch/engine`：
+> app 包内不能写（会破坏代码签名），工作树 `.work/` 也生成在那份可写副本里。
+> 如果你自己 clone 了仓库，GUI 会优先用仓库目录，行为和命令行完全一致。
+
+自己发包：`cd gui && ./tool/make_release.sh`（编译 → 内置引擎 → ad-hoc 重签 → `dist/*.zip`）。
+
 ## 环境要求
 
 | 项 | 要求 | 说明 |
 |---|---|---|
 | 系统 | **macOS** | 依赖 `codesign` / `Info.plist` / asar 校验，暂无其他平台实现 |
-| Python | **≥ 3.10** | 系统自带 3.9 会直接语法报错；`brew install python@3.13` |
+| Python | **≥ 3.9** | 系统自带的 3.9 即可（缺了就先 `xcode-select --install`）；`brew install python@3.13` 也行 |
 | 命令行工具 | Xcode CLT | `xcode-select --install`，提供 `codesign` |
 | 权限 | 对 `Claude.app` 可写 | 用户自己安装的即可；root 属主时用 sudo 或装到 `~/Applications` |
 | 可选 | OpenAI 兼容端点 | 仅 LLM 补译需要；没有会自动跳过，不影响应用汉化 |
@@ -27,7 +48,8 @@
 | `CLAUDE_ZH_APP` | 自动探测 `/Applications`、`~/Applications`，再问 Spotlight | Claude.app 路径 |
 | `CLAUDE_ZH_WORK` | `<工程目录>/.work` | 解包工作树 |
 | `CLAUDE_ZH_PROJECT` | 由工程位置推断 | GUI 启动时查找的工程目录 |
-| `CLAUDE_ZH_API` | 自动探测本地端口 | OpenAI 兼容 base URL（`…/v1`）或完整 URL |
+| `CLAUDE_ZH_PROTOCOL` | `openai` | API 协议：`openai`（OpenAI 兼容）或 `anthropic` |
+| `CLAUDE_ZH_API` | 自动探测本地端口 | Base URL（`…/v1`）或完整 chat 地址 |
 | `CLAUDE_ZH_MODEL` | 从 `/v1/models` 自动挑 | 模型名 |
 | `CLAUDE_ZH_KEY` | 空 | 需要鉴权时的 Bearer token |
 | `CLAUDE_ZH_PORTS` | 内置常见端口 | 探测端口列表，如 `1234,8080` |
@@ -125,6 +147,8 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 |---|---|
 | `zh_patch.py` | **补丁引擎**：asar 读写、integrity 摘要、重签、sync/stage/pack/verify/restore |
 | `gui/` | **图形界面**：Flutter macOS 应用（ClaudeHans.app） |
+| `gui/tool/make_release.sh` | 打可分发的 release zip（编译 GUI + 内置引擎 + 重签） |
+| `gui/tool/bundle_engine.py` | 把运行期脚本与翻译数据放进 app 包 |
 | `docs/screenshot.jpg` | 界面截图 |
 | `claude_paths.py` | 新旧布局统一路径解析（供所有工具复用） |
 | `apply.sh` / `restore.sh` | `zh_patch.py apply/restore` 的入口 |
@@ -151,7 +175,7 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 | **改资源后签名失效 → 无法启动** | 从内到外 ad-hoc 重签（嵌套 Mach-O / bundle 先签，外层最后），并清除 quarantine |
 | **升级后 JS 文件名哈希变化** | 按内容特征（语言数组字面量 / 名称映射锚点）动态定位，不写死文件名 |
 | **bundle 结构小改** | 语言白名单按「以 en-US 开头、≥5 个语言码」的数组正则定位，名称映射同理，不再写死具体语言列表 |
-| **Framework 体积数百 MB** | 用 `mmap` 搜索并原地改写 integrity 哨兵，不把整个二进制读进内存 |
+| **Framework 体积数百 MB** | 分块顺序读 + 定位哨兵后原地改写摘要；不用 `mmap`（macOS 26 会 SIGKILL 签名已失效包内 Mach-O 的 mmap 访问） |
 | **换机器 / 换安装位置** | 路径全部可覆盖 + 自动探测；`doctor` 一次性检查系统、Python、权限、布局、端点 |
 | **本地模型端口经常变** | `llm_endpoint.py` 自动扫描常见端口 + 模型候选；也可用 `CLAUDE_ZH_API` / `CLAUDE_ZH_MODEL` 指定 |
 | **ICU 结构易被破坏** | `retranslate_icu.py` 深度感知解析，校验变量集合 / 分支键 / `#` 数量 / HTML 标签 |
@@ -171,16 +195,19 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 - **校验补丁**：`zh_patch.py verify`
 - **环境体检**：`zh_patch.py doctor`
 - **还原原版**：`zh_patch.py restore`
-- **设置**：Claude.app / 工程目录 / Python 解释器 / LLM 端点，保存在 `~/.config/claude-zh-patch/gui.json`
+- **设置**：Claude.app / 引擎目录 / Python 解释器；LLM 可选「API 协议 + Base URL + API Key」，
+  点「获取模型列表」后从返回的模型中选择，保存在 `~/.config/claude-zh-patch/gui.json`
 
-GUI 只是把命令包装成子进程，行为与命令行完全一致。首次启动会自动定位工程目录
-（从当前目录逐级向上、`~/claude-zh-patch` 等位置查找），并用登录 shell 解析可用的 Python。
+GUI 只是把命令包装成子进程，行为与命令行完全一致。引擎目录的查找顺序是：
+`CLAUDE_ZH_PROJECT` → 上次选择 → 从当前目录逐级向上 → `~/claude-zh-patch` 等位置 →
+release 包内置引擎（复制到 Application Support 后可写）；Python 通过登录 shell 与常见安装位置解析。
 
 ```bash
 cd gui
-flutter run -d macos     # 开发运行
-flutter build macos      # 打包 → build/macos/Build/Products/Release/ClaudeHans.app
-flutter test             # 单元测试（命令执行 / 状态解析 / 配置序列化）
+flutter run -d macos       # 开发运行
+flutter build macos        # 打包 → build/macos/Build/Products/Release/ClaudeHans.app
+./tool/make_release.sh     # 出可分发的 zip（含内置引擎 + 重签）
+flutter test               # 单元测试（命令执行 / 状态解析 / 配置序列化 / 模型列表）
 ```
 
 > 为了能调用 python 与读写 `/Applications/Claude.app`，runner 关闭了 App Sandbox

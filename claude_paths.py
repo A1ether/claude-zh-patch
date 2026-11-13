@@ -18,7 +18,7 @@ Claude 4.42xx 起把前端资源从松散目录 `Resources/ion-dist/` 收进了
   CLAUDE_ZH_WORK      工作树目录（默认 <工程目录>/.work）
   CLAUDE_ZH_PROJECT   工程目录（仅 GUI 使用，命令行下由脚本位置推断）
 
-环境要求：macOS + Python ≥ 3.10
+环境要求：macOS + Python ≥ 3.9（系统自带 / Xcode CLT 的 3.9.6 即可）
 """
 from __future__ import annotations
 
@@ -28,7 +28,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-MIN_PYTHON = (3, 10)
+# 3.9 是 macOS 自带（Xcode CLT）的版本，降低门槛让 release 用户少一步安装。
+# 代码里所有新式注解都靠 `from __future__ import annotations` 延迟求值，
+# 已确认 asar 打包 / 完整性摘要 / 翻译脚本在 3.9.6 下均正常。
+MIN_PYTHON = (3, 9)
 DEFAULT_APP_CANDIDATES = (
     "/Applications/Claude.app",
     "~/Applications/Claude.app",

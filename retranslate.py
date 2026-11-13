@@ -9,7 +9,7 @@ Claude UI 文案 LLM 重译引擎
   python3 retranslate.py --apply          # 合并结果到 zh-Hans-final.json
 """
 from __future__ import annotations
-import argparse, json, os, re, sys, time, urllib.request
+import argparse, json, os, re, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,13 +21,8 @@ EN_FILE = P.require_en()
 QUEUE = PATCH_DIR / "translate_queue.json"
 DONE = PATCH_DIR / "translate_done.json"
 
-from llm_endpoint import auth_headers, discover as _discover
+from llm_client import chat
 from llm_parse import parse_objects
-try:
-    API, MODEL = _discover()  # 自动探测可用本地端点
-except RuntimeError as e:
-    print("✗ " + str(e))
-    raise SystemExit(1)
 BATCH = 30
 
 # ---------------- 术语表（注入 prompt） ----------------
@@ -146,21 +141,9 @@ def prepare():
 
 def call_llm(batch: list) -> dict:
     items = [{"id": it["id"], "en": it["en"]} for it in batch]
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(items, ensure_ascii=False, indent=1)},
-        ],
-        "temperature": 0.15,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        API, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", **auth_headers()})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        body = json.load(r)
-    content = body["choices"][0]["message"]["content"].strip()
+    content = chat(SYSTEM_PROMPT,
+                   json.dumps(items, ensure_ascii=False, indent=1),
+                   temperature=0.15, timeout=180).strip()
     # 容错：剥掉可能的 ```json 包裹
     content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
     # 模型可能把一批结果拆成多个 JSON 对象，逐个解析并合并
@@ -216,6 +199,9 @@ def run():
 
         for it in batch:
             tr = res.get(it["id"])
+            if tr is None:
+                # 模型偶尔用英文原文当 key，回退匹配
+                tr = res.get(it["en"].strip()) or res.get(it["en"])
             if tr is None:
                 fail_cnt += 1
                 continue

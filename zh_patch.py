@@ -46,7 +46,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import mmap
 import os
 import plistlib
 import re
@@ -320,19 +319,28 @@ def sentinels() -> list[bytes]:
     return out or INTEGRITY_SENTINELS
 
 
-def mmap_find_first(path: Path, needle: bytes) -> int | None:
-    """在文件里搜索第一个匹配（mmap，不把几百 MB 的 Framework 读进内存）。"""
+def file_find_first(path: Path, needle: bytes,
+                    chunk: int = 8 * 1024 * 1024) -> int | None:
+    """分块普通读文件找第一个匹配。
+
+    注意：不能用 mmap —— macOS 26 对「签名失效的应用包」里的 Mach-O 做内存映射时
+    AMFI 会直接 SIGKILL（CODESIGNING / Invalid Page），表现为 Python "意外退出"。
+    """
+    overlap = len(needle) + 64
+    pos = 0
+    tail = b""
     try:
         with open(path, "rb") as f:
-            try:
-                m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            except (ValueError, OSError):
-                return None
-            try:
-                i = m.find(needle)
-                return i if i >= 0 else None
-            finally:
-                m.close()
+            while True:
+                data = f.read(chunk)
+                if not data:
+                    return None
+                buf = tail + data
+                i = buf.find(needle)
+                if i >= 0:
+                    return pos - len(tail) + i
+                tail = buf[-overlap:]
+                pos += len(data)
     except OSError:
         return None
 
@@ -349,7 +357,7 @@ def read_framework_digest() -> tuple[int, int, str] | None:
     """读取第一个哨兵槽：(used, version, digest_hex)。"""
     for path in framework_targets():
         for sent in sentinels():
-            i = mmap_find_first(path, sent)
+            i = file_find_first(path, sent)
             if i is None:
                 continue
             try:
@@ -372,25 +380,29 @@ def patch_framework_digest(new_digest: str) -> int:
     total = 0
     for path in framework_targets():
         try:
-            with open(path, "r+b") as f:
-                m = mmap.mmap(f.fileno(), 0)
-                try:
-                    for sent in sentinels():
-                        i = 0
-                        while True:
-                            i = m.find(sent, i)
-                            if i < 0:
-                                break
-                            m[i + 32] = 1          # used
-                            m[i + 33] = 1          # version
-                            m[i + 34:i + 66] = want
-                            total += 1
-                            i += 66
-                    m.flush()
-                finally:
-                    m.close()
+            # 普通读写而非 mmap：见 file_find_first 的说明
+            data = bytearray(path.read_bytes())
         except OSError as e:
-            print(f"  ⚠ 无法改写 {path.name}: {e}")
+            print(f"  ⚠ 无法读取 {path.name}: {e}")
+            continue
+        hit = False
+        for sent in sentinels():
+            i = 0
+            while True:
+                i = data.find(sent, i)
+                if i < 0:
+                    break
+                data[i + 32] = 1                 # used
+                data[i + 33] = 1                 # version
+                data[i + 34:i + 66] = want
+                total += 1
+                hit = True
+                i += 66
+        if hit:
+            try:
+                path.write_bytes(data)
+            except OSError as e:
+                print(f"  ⚠ 无法改写 {path.name}: {e}")
     return total
 
 
@@ -704,6 +716,25 @@ def inject_name_map() -> int:
 
 # ---------------------------------------------------------------- stage / pack
 
+TCC_HINT = (
+    "  这是 macOS 的「App 管理」隐私保护，不是文件权限问题。\n"
+    "  解决任一：\n"
+    "    · 在终端里运行: cd <工程目录> && ./update.sh --quick\n"
+    "    · 系统设置 → 隐私与安全性 → App 管理 → 允许当前程序\n"
+    "  （GUI 每次重新构建后 ad-hoc 签名身份会变，可能需要重新放行）")
+
+
+def _probe_writable(d: Path) -> bool:
+    """真实写一次探针文件——os.access 查不出 TCC 的 EPERM。"""
+    probe = d / ".zh_patch_write_test"
+    try:
+        probe.write_bytes(b"0")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def preflight_write():
     """打包前检查：目标可写 + 磁盘够用（失败时给出可执行的处理方式）。"""
     if not APP.is_dir():
@@ -714,6 +745,9 @@ def preflight_write():
             "  · 把 Claude 拖到 ~/Applications 后安装，或\n"
             "  · 用管理员权限运行（sudo），或\n"
             "  · 用 CLAUDE_ZH_APP 指向可写的副本。")
+    if not _probe_writable(RES):
+        raise SystemExit(
+            f"✗ 无法写入 {RES}：Operation not permitted\n" + TCC_HINT)
     need = 600 * 1024 * 1024
     free = shutil.disk_usage(RES).free
     if free < need:
@@ -756,8 +790,12 @@ def do_pack():
 
     # 原子替换
     dst = RES / "ion-dist.asar.tmp"
-    shutil.copy2(tmp_out, dst)
-    os.replace(dst, ION_ASAR)
+    try:
+        shutil.copy2(tmp_out, dst)
+        os.replace(dst, ION_ASAR)
+    except PermissionError as e:
+        raise SystemExit(
+            f"✗ 无法写入 {e.filename or dst}：Operation not permitted\n" + TCC_HINT)
     prev = set_plist_asar_hash(stat["header_sha256"])
     print(f"  ✓ 已写入 {ION_ASAR}")
     print(f"    头部 SHA256: {str(prev)[:16]}… → {stat['header_sha256'][:16]}…")
@@ -1091,9 +1129,12 @@ def _llm_status() -> dict:
     try:
         import llm_endpoint
         base, model = llm_endpoint.discover()
-        return {"available": True, "base": base, "model": model}
+        return {"available": True, "base": base, "model": model,
+                "protocol": llm_endpoint.protocol()}
     except Exception as e:
-        return {"available": False, "error": str(e)}
+        return {"available": False, "error": str(e),
+                "protocol": getattr(__import__("llm_endpoint"),
+                                    "protocol", lambda: "openai")()}
 
 
 def cmd_status(args):

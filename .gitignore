@@ -7,6 +7,9 @@ backup/
 # 翻译文件的本地时间戳备份
 zh-Hans-final.json.bak-*
 
+# release 打包产物
+dist/
+
 # Python / macOS 杂项
 __pycache__/
 *.pyc

@@ -7,7 +7,7 @@ ICU MessageFormat 条目重译器
 用法: python3 retranslate_icu.py [--dry-run]
 """
 from __future__ import annotations
-import argparse, json, re, shutil, sys, time, urllib.request
+import argparse, json, re, shutil, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,13 +20,8 @@ EN_FILE = P.require_en()
 APP_ZH = P.app_zh_file()
 DONE_F = PATCH_DIR / "icu_done.json"
 
-from llm_endpoint import auth_headers, discover as _discover
+from llm_client import chat
 from llm_parse import parse_objects
-try:
-    API, MODEL = _discover()  # 自动探测可用本地端点
-except RuntimeError as e:
-    print("✗ " + str(e))
-    raise SystemExit(1)
 BATCH = 12   # ICU 结构复杂，批小一点
 
 SYSTEM = """你是资深软件 UI 中文本地化专家，翻译 ICU MessageFormat 格式的界面文案。
@@ -131,21 +126,9 @@ def verify(en: str, tr: str) -> tuple[bool, str]:
     return True, "ok"
 
 def call_llm(items: list) -> dict:
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": json.dumps(items, ensure_ascii=False, indent=1)},
-        ],
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-    }
-    req = urllib.request.Request(
-        API, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", **auth_headers()})
-    with urllib.request.urlopen(req, timeout=240) as r:
-        body = json.load(r)
-    c = body["choices"][0]["message"]["content"].strip()
+    c = chat(SYSTEM,
+             json.dumps(items, ensure_ascii=False, indent=1),
+             temperature=0.1, timeout=240).strip()
     c = re.sub(r"^```(?:json)?\s*|\s*```$", "", c)
     res = parse_objects(c)
     if not res:
@@ -205,6 +188,9 @@ def main():
 
         for it in batch:
             tr = res.get(it["id"])
+            if tr is None:
+                # 模型偶尔用英文原文当 key，回退匹配
+                tr = res.get(it["en"].strip()) or res.get(it["en"])
             if tr is None:
                 fail += 1; continue
             good, why = verify(it["en"], tr)

@@ -13,7 +13,7 @@
 #   CLAUDE_ZH_APP     Claude.app 路径（默认自动探测）
 #   CLAUDE_ZH_WORK    工作树目录（默认 .work）
 #   CLAUDE_ZH_API / CLAUDE_ZH_MODEL / CLAUDE_ZH_KEY   LLM 端点与鉴权
-#   PYTHON            解释器（默认 python3，需 ≥ 3.10）
+#   PYTHON            解释器（默认 python3，需 ≥ 3.9）
 
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -29,7 +29,9 @@ for arg in "$@"; do
 done
 
 PY="${PYTHON:-python3}"
-APP="${CLAUDE_ZH_APP:-/Applications/Claude.app}"
+APP="${CLAUDE_ZH_APP:-}"
+# 未指定时让引擎自己探测（/Applications、~/Applications、Spotlight）
+APP_NAME=""
 
 echo "############################################################"
 echo "#  Claude 中文汉化 - 升级后一键更新"
@@ -41,16 +43,19 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 if ! command -v "$PY" >/dev/null 2>&1; then
-  echo "✗ 找不到 $PY。安装 Python 3.10+ 或设置 PYTHON=/path/to/python3"
+  echo "✗ 找不到 $PY。安装 Python 3.9+ 或设置 PYTHON=/path/to/python3"
   exit 1
 fi
-if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)'; then
-  echo "✗ 需要 Python ≥ 3.10（当前 $("$PY" -V 2>&1)）"
-  echo "  brew install python@3.13 后设置 PYTHON=python3.13"
+if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,9) else 1)'; then
+  echo "✗ 需要 Python ≥ 3.9（当前 $("$PY" -V 2>&1)）"
+  echo "  xcode-select --install 或 brew install python@3.13"
   exit 1
+fi
+if [ -z "$APP" ]; then
+  APP="$("$PY" -c 'import claude_paths as P; print(P.APP)' 2>/dev/null || true)"
 fi
 if [ ! -d "$APP" ]; then
-  echo "✗ 找不到 $APP"
+  echo "✗ 找不到 Claude.app（探测到: ${APP:-无}）"
   echo "  用 CLAUDE_ZH_APP=/path/to/Claude.app 指定"
   exit 1
 fi

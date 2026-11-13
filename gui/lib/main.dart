@@ -68,9 +68,23 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _cfg = ConfigStore.load();
-    final found = ProjectResolver.resolve(_cfg.projectDir);
-    if (found != null) _cfg.projectDir = found;
-    _boot();
+    _bootstrap();
+    // 便于调试/截图：CLAUDE_ZH_OPEN_SETTINGS=1 启动时直接打开设置
+    if (Platform.environment['CLAUDE_ZH_OPEN_SETTINGS'] == '1') {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openSettings());
+    }
+  }
+
+  /// 先准备引擎（release 包里第一次启动会把内置引擎复制到 Application Support），
+  /// 再决定用哪个目录：仓库 > 内置引擎副本。
+  Future<void> _bootstrap() async {
+    final builtin = await ProjectResolver.prepareBundled();
+    final found = ProjectResolver.resolve(_cfg.projectDir) ?? builtin;
+    if (!mounted) return;
+    setState(() {
+      if (found != null) _cfg.projectDir = found;
+    });
+    await _boot();
   }
 
   Future<void> _boot() async {
@@ -92,6 +106,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, String> _env() {
     final env = <String, String>{'PYTHONUNBUFFERED': '1'};
     if (_cfg.appPath.isNotEmpty) env['CLAUDE_ZH_APP'] = _cfg.appPath;
+    env['CLAUDE_ZH_PROTOCOL'] = _cfg.protocol;
     if (_cfg.llmApi.isNotEmpty) env['CLAUDE_ZH_API'] = _cfg.llmApi;
     if (_cfg.llmModel.isNotEmpty) env['CLAUDE_ZH_MODEL'] = _cfg.llmModel;
     if (_cfg.llmKey.isNotEmpty) env['CLAUDE_ZH_KEY'] = _cfg.llmKey;
@@ -99,6 +114,8 @@ class _HomePageState extends State<HomePage> {
     if (py != null && py.contains('/')) {
       final parent = File(py).parent.path;
       env['PATH'] = '$parent:${Platform.environment['PATH'] ?? '/usr/bin:/bin'}';
+      // update.sh 等脚本按 $PYTHON 找解释器
+      env['PYTHON'] = py;
     }
     return env;
   }
@@ -116,7 +133,7 @@ class _HomePageState extends State<HomePage> {
     Map<String, dynamic>? st;
     String? err;
     if (python == null) {
-      err = '未找到 Python ≥ 3.10。安装 Python 或在设置里指定解释器。';
+      err = '未找到 Python（需要 ≥ 3.9）。点下面的「复制命令」装一个，或在设置里指定解释器。';
     } else {
       final raw = await TaskRunner.capture(
         python,
@@ -535,6 +552,11 @@ class _StatusPane extends StatelessWidget {
     return v.toString();
   }
 
+  /// release 包内置引擎不用用户 clone 仓库，界面别甩一串 Library 路径
+  String get _engineLabel => ProjectResolver.isBundled(projectDir)
+      ? '内置引擎（已随 app 安装）'
+      : projectDir;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -633,7 +655,7 @@ class _StatusPane extends StatelessWidget {
               ),
               Align(
                 alignment: Alignment.centerLeft,
-                child: SelectableText('工程: $projectDir',
+                child: SelectableText('引擎: $_engineLabel',
                     maxLines: 2,
                     style: TextStyle(
                         fontSize: 11,
@@ -642,7 +664,10 @@ class _StatusPane extends StatelessWidget {
             ],
           ),
         ),
-        if (error != null) ...[
+        if (python == null) ...[
+          const SizedBox(height: 12),
+          const _PythonMissingCard(),
+        ] else if (error != null) ...[
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
@@ -720,6 +745,65 @@ class _StatusPane extends StatelessWidget {
 String _fmtMb(num? bytes) {
   if (bytes == null) return '—';
   return '${(bytes / 1024 / 1024).toStringAsFixed(0)} MB';
+}
+
+class _PythonMissingCard extends StatelessWidget {
+  const _PythonMissingCard();
+
+  void _copy(BuildContext context, String cmd) {
+    Clipboard.setData(ClipboardData(text: cmd));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已复制：$cmd'), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  Widget _cmd(BuildContext context, String cmd) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: SelectableText(cmd,
+                style: const TextStyle(
+                    fontFamily: 'Menlo', fontSize: 11)),
+          ),
+          IconButton(
+            tooltip: '复制',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.copy_rounded, size: 15, color: scheme.primary),
+            onPressed: () => _copy(context, cmd),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _Card(
+      title: '需要 Python',
+      trailing: Icon(Icons.terminal_rounded, size: 16, color: scheme.primary),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('汉化引擎用 Python 写成，装一次即可（macOS 自带或 Xcode 命令行工具里的 3.9 就行）。'
+              '打开「终端」粘贴任意一行的命令：',
+              style: TextStyle(
+                  fontSize: 11.5,
+                  height: 1.5,
+                  color: scheme.onSurface.withValues(alpha: .7))),
+          _cmd(context, 'xcode-select --install'),
+          _cmd(context, 'brew install python@3.13'),
+          const SizedBox(height: 6),
+          Text('装完点右上角刷新。已经有 Python 但没找到？在设置里直接填解释器路径。',
+              style: TextStyle(
+                  fontSize: 11, color: scheme.onSurface.withValues(alpha: .55))),
+        ],
+      ),
+    );
+  }
 }
 
 class _Card extends StatelessWidget {
@@ -1073,9 +1157,13 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   late final TextEditingController _project;
   late final TextEditingController _app;
   late final TextEditingController _python;
-  late final TextEditingController _api;
+  late final TextEditingController _base;
   late final TextEditingController _model;
   late final TextEditingController _key;
+  late String _protocol;
+  List<String> _models = [];
+  bool _fetching = false;
+  String? _fetchError;
   String? _error;
 
   @override
@@ -1084,17 +1172,39 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     _project = TextEditingController(text: widget.config.projectDir);
     _app = TextEditingController(text: widget.config.appPath);
     _python = TextEditingController(text: widget.config.pythonPath);
-    _api = TextEditingController(text: widget.config.llmApi);
+    _protocol = widget.config.protocol.isEmpty ? 'openai' : widget.config.protocol;
+    _base = TextEditingController(text: widget.config.llmApi);
     _model = TextEditingController(text: widget.config.llmModel);
     _key = TextEditingController(text: widget.config.llmKey);
   }
 
   @override
   void dispose() {
-    for (final c in [_project, _app, _python, _api, _model, _key]) {
+    for (final c in [_project, _app, _python, _base, _model, _key]) {
       c.dispose();
     }
     super.dispose();
+  }
+
+  Future<void> _fetchModels() async {
+    setState(() {
+      _fetching = true;
+      _fetchError = null;
+    });
+    final res = await fetchModelList(
+      protocol: _protocol,
+      baseUrl: _base.text,
+      apiKey: _key.text.trim(),
+    );
+    if (!mounted) return;
+    setState(() {
+      _fetching = false;
+      _models = res.models;
+      _fetchError = res.error;
+      if (res.models.isNotEmpty && _model.text.trim().isEmpty) {
+        _model.text = res.models.first;
+      }
+    });
   }
 
   void _save() {
@@ -1109,7 +1219,8 @@ class _SettingsDialogState extends State<_SettingsDialog> {
         projectDir: project,
         appPath: _app.text.trim(),
         pythonPath: _python.text.trim(),
-        llmApi: _api.text.trim(),
+        protocol: _protocol,
+        llmApi: _base.text.trim(),
         llmModel: _model.text.trim(),
         llmKey: _key.text.trim(),
       ),
@@ -1127,7 +1238,9 @@ class _SettingsDialogState extends State<_SettingsDialog> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _label('工程目录（含 zh_patch.py）'),
+              _label(ProjectResolver.isBundled(_project.text)
+                  ? '汉化引擎：内置（随 app 安装，无需 clone 仓库）'
+                  : '工程目录（含 zh_patch.py）'),
               _pathField(_project, () async {
                 final p = await pickFolder('选择汉化工程目录');
                 if (p != null) setState(() => _project.text = p);
@@ -1139,7 +1252,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                 if (p != null) setState(() => _app.text = p);
               }),
               const SizedBox(height: 14),
-              _label('Python 解释器（留空自动探测，需 ≥ 3.10）'),
+              _label('Python 解释器（留空自动探测，需 ≥ 3.9）'),
               _pathField(_python, () async {
                 final p = await pickFile('选择 python3');
                 if (p != null) setState(() => _python.text = p);
@@ -1151,35 +1264,62 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                       fontWeight: FontWeight.w600,
                       color: scheme.onSurface.withValues(alpha: .7))),
               const SizedBox(height: 10),
-              _label('API Base URL'),
-              TextField(
-                controller: _api,
-                decoration: const InputDecoration(
-                  hintText: 'http://127.0.0.1:1234/v1',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  SizedBox(
+                    width: 150,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _label('API 协议'),
+                        DropdownButtonFormField<String>(
+                          initialValue: _protocol,
+                          isDense: true,
+                          decoration: const InputDecoration(
+                              isDense: true,
+                              border: OutlineInputBorder()),
+                          items: const [
+                            DropdownMenuItem(
+                                value: 'openai', child: Text('OpenAI 兼容')),
+                            DropdownMenuItem(
+                                value: 'anthropic', child: Text('Anthropic')),
+                          ],
+                          onChanged: (v) => setState(() {
+                            _protocol = v ?? 'openai';
+                            _models = [];
+                            _fetchError = null;
+                          }),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _label('模型名'),
+                        _label('Base URL'),
                         TextField(
-                          controller: _model,
-                          decoration: const InputDecoration(
-                            hintText: 'qwen2.5-7b-instruct',
+                          controller: _base,
+                          style: const TextStyle(fontSize: 12.5),
+                          decoration: InputDecoration(
+                            hintText: _protocol == 'anthropic'
+                                ? 'https://api.anthropic.com/v1'
+                                : 'http://127.0.0.1:1234/v1',
                             isDense: true,
-                            border: OutlineInputBorder(),
+                            border: const OutlineInputBorder(),
                           ),
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 12),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1188,6 +1328,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                         TextField(
                           controller: _key,
                           obscureText: true,
+                          style: const TextStyle(fontSize: 12.5),
                           decoration: const InputDecoration(
                             hintText: 'sk-…',
                             isDense: true,
@@ -1197,8 +1338,47 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                       ],
                     ),
                   ),
+                  const SizedBox(width: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 21),
+                    child: OutlinedButton.icon(
+                      onPressed: _fetching ? null : _fetchModels,
+                      icon: _fetching
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.cloud_download_outlined, size: 16),
+                      label: Text(_fetching ? '获取中…' : '获取模型列表'),
+                    ),
+                  ),
                 ],
               ),
+              const SizedBox(height: 12),
+              _label('模型'),
+              DropdownMenu<String>(
+                controller: _model,
+                width: 556,
+                menuHeight: 280,
+                enableFilter: true,
+                requestFocusOnTap: true,
+                hintText: '先获取列表，或直接输入模型名',
+                dropdownMenuEntries: _models
+                    .map((m) => DropdownMenuEntry(value: m, label: m))
+                    .toList(),
+              ),
+              const SizedBox(height: 6),
+              if (_fetchError != null)
+                Text(_fetchError!,
+                    style: TextStyle(color: scheme.error, fontSize: 11.5))
+              else
+                Text(
+                    _models.isEmpty
+                        ? '填写 Base URL 与 Key 后点「获取模型列表」'
+                        : '已获取 ${_models.length} 个模型，可直接选择',
+                    style: TextStyle(
+                        fontSize: 11.5,
+                        color: scheme.onSurface.withValues(alpha: .55))),
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Text(_error!, style: TextStyle(color: scheme.error, fontSize: 12)),
