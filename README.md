@@ -99,6 +99,7 @@ python3 zh_patch.py pack        # 工作树 → asar + 更新校验值 + 重签
 python3 zh_patch.py apply       # sync + stage + pack
 python3 zh_patch.py verify      # 校验 integrity / 头部 hash / 整表摘要 / 中文文件 / 覆盖率
 python3 zh_patch.py restore     # 还原官方原版（含重签；版本不一致需 --force）
+python3 zh_patch.py resign      # 只重新 ad-hoc 签名（不重新打包）
 python3 zh_patch.py doctor      # 环境体检（macOS / Python / 权限 / 布局 / 模型端点）
 python3 zh_patch.py status      # JSON 状态，供 GUI 读取
 
@@ -187,6 +188,10 @@ flutter test             # 单元测试（命令执行 / 状态解析 / 配置�
 
 ## 注意事项
 
+- **重签会剔除受限 entitlements**：ad-hoc 签名不支持 Apple 签发的 `com.apple.application-identifier`、
+  `com.apple.developer.team-identifier`、`keychain-access-groups` 等受限项。保留它们会导致
+  启动时被 AMFI 直接 `SIGKILL`（`open` 报 `EBADMACHO` / "Launchd job spawn failed"）。
+  补丁会自动剔除并移除失效的 `embedded.provisionprofile`；代价是钥匙串相关能力受限（见下一条）。
 - **重签是必须的**：改 `Resources/` 或 Framework 二进制后，macOS 会拒绝启动签名破损的包。
   补丁用 ad-hoc 签名（保留原 entitlements），副作用是**应用签名身份改变**：
   - 钥匙串里 Electron safeStorage 的旧条目可能需要重新授权一次（首次启动可能提示）

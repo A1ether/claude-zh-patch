@@ -53,6 +53,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -420,25 +421,85 @@ def sign_targets() -> list[Path]:
     return items
 
 
+# ad-hoc 签名下，Apple 签发的「受限」entitlements 无法通过 AMFI 校验：
+# 进程一 exec 就被 SIGKILL，open 表现为 EBADMACHO / "Launchd job spawn failed"。
+# 这些项只对 Developer ID / App Store 签名有效，本地补丁必须剔除。
+RESTRICTED_ENTITLEMENTS = {
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+    "keychain-access-groups",
+}
+
+
+def read_entitlements(path: Path) -> dict:
+    r = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(path)],
+                       capture_output=True)
+    if r.returncode != 0 or not r.stdout:
+        return {}
+    try:
+        ent = plistlib.loads(r.stdout)
+        return ent if isinstance(ent, dict) else {}
+    except Exception:
+        return {}
+
+
+def scrub_entitlements(ent: dict) -> dict:
+    return {k: v for k, v in ent.items()
+            if k not in RESTRICTED_ENTITLEMENTS
+            and not k.startswith("com.apple.developer.")}
+
+
+def _sign_item(path: Path) -> bool:
+    """重签单个代码对象；返回是否剔除了受限 entitlements。"""
+    cmd = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
+    ent = read_entitlements(path)
+    clean = scrub_entitlements(ent) if ent else {}
+    if ent and clean != ent:
+        with tempfile.NamedTemporaryFile("wb", suffix=".plist", delete=False) as f:
+            plistlib.dump(clean, f)
+            tmp = f.name
+        try:
+            subprocess.run(cmd + ["--entitlements", tmp, str(path)],
+                           capture_output=True)
+        finally:
+            os.unlink(tmp)
+        return True
+    subprocess.run(cmd + ["--preserve-metadata=entitlements", str(path)],
+                   capture_output=True)
+    return False
+
+
 def sign_all() -> tuple[bool, str]:
     """从内到外重签整个 app（ad-hoc）。
 
     改 Resources/ 与 Framework 二进制后，macOS 会拒绝启动签名破损的包，
     所以必须重签。ad-hoc 签名会改变应用身份，钥匙串里的旧条目可能要求重新授权
     （Electron safeStorage 会提示一次）。
+
+    ad-hoc 不支持的受限 entitlements（team / application-identifier /
+    keychain-access-groups 等）会被剔除，否则系统会在启动时直接 SIGKILL。
     """
     exe = P.executable()
+    scrubbed = 0
     for item in sign_targets():
         if item == exe:
             continue
-        subprocess.run(["codesign", "--force", "--sign", "-",
-                        "--preserve-metadata=entitlements", "--timestamp=none",
-                        str(item)], capture_output=True)
-    r = subprocess.run(["codesign", "--force", "--sign", "-",
-                        "--preserve-metadata=entitlements", "--timestamp=none",
-                        str(APP)], capture_output=True, text=True)
+        scrubbed += 1 if _sign_item(item) else 0
+
+    # 官方 provisioning profile 在 ad-hoc 下无效，留着会与 entitlements 校验冲突
+    prof = APP / "Contents" / "embedded.provisionprofile"
+    if prof.exists():
+        prof.unlink()
+
+    scrubbed += 1 if _sign_item(APP) else 0
+    if scrubbed:
+        print("  · 已剔除 ad-hoc 不支持的受限 entitlements（team / keychain 等）")
+
+    r = subprocess.run(["codesign", "--verify", "--strict", str(APP)],
+                       capture_output=True, text=True)
     if r.returncode != 0:
-        return False, (r.stderr.strip().splitlines() or ["?"])[0][:200]
+        err = (r.stderr.strip().splitlines() or ["?"])[0][:200]
+        return False, err
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(APP)],
                    capture_output=True)
     v = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(APP)],
@@ -745,6 +806,18 @@ def cmd_apply(args):
 
 
 # ---------------------------------------------------------------- verify
+
+def cmd_resign(args):
+    print("=" * 60)
+    print(" 重新签名（ad-hoc，剔除受限 entitlements）")
+    print("=" * 60)
+    ok, err = sign_all()
+    if ok:
+        print("✓ 签名校验通过")
+        return 0
+    print(f"✗ 重签失败: {err}")
+    return 1
+
 
 def cmd_verify(args):
     print("=" * 60)
@@ -1102,6 +1175,9 @@ def main():
 
     a = sub.add_parser("apply", help="sync + stage + pack（含重签）")
     a.set_defaults(func=cmd_apply)
+
+    sg = sub.add_parser("resign", help="重新 ad-hoc 签名（剔除受限 entitlements）")
+    sg.set_defaults(func=cmd_resign)
 
     v = sub.add_parser("verify", help="校验当前补丁状态")
     v.set_defaults(func=cmd_verify)

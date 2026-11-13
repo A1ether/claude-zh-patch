@@ -21,6 +21,7 @@ APP_ZH = P.app_zh_file()
 DONE_F = PATCH_DIR / "icu_done.json"
 
 from llm_endpoint import auth_headers, discover as _discover
+from llm_parse import parse_objects
 try:
     API, MODEL = _discover()  # 自动探测可用本地端点
 except RuntimeError as e:
@@ -146,10 +147,10 @@ def call_llm(items: list) -> dict:
         body = json.load(r)
     c = body["choices"][0]["message"]["content"].strip()
     c = re.sub(r"^```(?:json)?\s*|\s*```$", "", c)
-    s, e = c.find("{"), c.rfind("}")
-    if s >= 0 and e > s:
-        c = c[s:e+1]
-    return json.loads(c)
+    res = parse_objects(c)
+    if not res:
+        raise ValueError("模型未返回可解析的 JSON: " + c[:120].replace("\n", " "))
+    return res
 
 def collect():
     """收集待译 ICU 条目（以 en-US 为基准，排除路径/URL 类）"""

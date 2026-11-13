@@ -22,6 +22,7 @@ QUEUE = PATCH_DIR / "translate_queue.json"
 DONE = PATCH_DIR / "translate_done.json"
 
 from llm_endpoint import auth_headers, discover as _discover
+from llm_parse import parse_objects
 try:
     API, MODEL = _discover()  # 自动探测可用本地端点
 except RuntimeError as e:
@@ -162,11 +163,11 @@ def call_llm(batch: list) -> dict:
     content = body["choices"][0]["message"]["content"].strip()
     # 容错：剥掉可能的 ```json 包裹
     content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
-    # 找第一个 { 到最后一个 }
-    s, e = content.find("{"), content.rfind("}")
-    if s >= 0 and e > s:
-        content = content[s:e+1]
-    return json.loads(content)
+    # 模型可能把一批结果拆成多个 JSON 对象，逐个解析并合并
+    res = parse_objects(content)
+    if not res:
+        raise ValueError("模型未返回可解析的 JSON: " + content[:120].replace("\n", " "))
+    return res
 
 def verify(it: dict, translated: str) -> tuple[bool, str]:
     """校验占位符与 HTML 标签完整性"""
