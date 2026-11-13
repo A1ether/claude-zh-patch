@@ -35,3 +35,14 @@ flutter build macos      # → build/macos/Build/Products/Release/ClaudeHans.app
 - runner 关闭了 App Sandbox（`macos/Runner/*.entitlements`），否则无法调用 python、
   也无法读写 `/Applications/Claude.app`。
 - 不做任何写操作之前都会弹确认框；「一键汉化」会退出并重启 Claude。
+
+## 图标
+
+应用图标按「紫蓝渐变圆角方块 + 白色『文』字」设计（与界面左上角标记一致），
+不使用 Flutter 默认图标。需要调整时改 [generate_app_icon.py](tool/generate_app_icon.py)
+后执行，会直接重写 `macos/Runner/Assets.xcassets/AppIcon.appiconset/` 下的 7 个尺寸：
+
+```bash
+python3 -m pip install pillow
+python3 tool/generate_app_icon.py
+```
