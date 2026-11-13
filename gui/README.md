@@ -1,0 +1,37 @@
+# Claude 汉化助手（GUI）
+
+Claude Desktop 简体中文补丁的 macOS 图形界面，Flutter 实现。
+
+## 功能
+
+- 状态总览：Claude 版本、前端布局、汉化状态、integrity 校验、覆盖率、工作树、LLM 端点
+- 一键汉化 / 完整更新 / 校验 / 环境体检 / 还原原版
+- 实时输出日志（可复制），运行中可中断
+- 设置：Claude.app 路径、工程目录、Python 解释器、LLM 端点
+
+所有操作都等价于在工程根目录执行对应的命令行：
+
+| 按钮 | 实际命令 |
+|---|---|
+| 一键汉化 | `./update.sh --quick` |
+| 完整更新 | `./update.sh` |
+| 校验补丁 | `python3 zh_patch.py verify` |
+| 环境体检 | `python3 zh_patch.py doctor` |
+| 还原原版 | `python3 zh_patch.py restore` |
+
+## 开发与打包
+
+```bash
+flutter run -d macos     # 开发
+flutter test             # 单元测试
+flutter build macos      # → build/macos/Build/Products/Release/ClaudeHans.app
+```
+
+应用首次启动会自动寻找包含 `zh_patch.py` 的工程目录，并用登录 shell 解析 Python ≥ 3.10。
+配置保存在 `~/.config/claude-zh-patch/gui.json`。
+
+## 说明
+
+- runner 关闭了 App Sandbox（`macos/Runner/*.entitlements`），否则无法调用 python、
+  也无法读写 `/Applications/Claude.app`。
+- 不做任何写操作之前都会弹确认框；「一键汉化」会退出并重启 Claude。

@@ -59,7 +59,11 @@ def main():
     sources = []
     if ZH_FILE.exists():
         sources.append(ZH_FILE)
-    sources += sorted(PATCH_DIR.glob("zh-Hans-final.json.bak-*"))
+    baks = sorted(PATCH_DIR.glob("zh-Hans-final.json.bak-*"))
+    sources += baks
+    if not baks:
+        print("  · 未发现历史备份（zh-Hans-final.json.bak-*），同值传播只用当前文件")
+        print("    新克隆的仓库通常是这种情况：功能正常，只是命中率略低")
     for src in sources:
         try:
             d = json.loads(Path(src).read_text(encoding="utf-8"))

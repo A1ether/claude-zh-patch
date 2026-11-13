@@ -32,6 +32,8 @@ Claude 4.42xx 起把前端资源从松散目录 `Resources/ion-dist/` 收进了
   python3 zh_patch.py verify              # 校验当前 app 的 integrity / 中文文件
   python3 zh_patch.py restore             # 从备份还原官方原版
   python3 zh_patch.py info                # 打印环境与版本信息
+  python3 zh_patch.py doctor              # 环境体检（macOS / Python / 权限 / 端点）
+  python3 zh_patch.py status              # JSON 状态（GUI 用）
 
 关于签名：改 Resources/ 或 Framework 二进制后，macOS 会拒绝启动签名破损的包，
 且 Electron 44 起还会校验「ElectronAsarIntegrity 整表摘要」（烧在
@@ -44,8 +46,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mmap
 import os
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
@@ -61,14 +65,14 @@ INFO_PLIST = P.INFO_PLIST
 ION_ASAR = P.ION_ASAR
 ION_DIR = P.ION_DIR
 LANG = P.LANG
-LANG_NAME = "Chinese (Simplified)"
-LANG_LOCAL = "中文（简体）"
+LANG_NAME = P.LANG_NAME
+LANG_LOCAL = P.LANG_LOCAL
 
 PATCH_DIR = P.PATCH_DIR
 ZH_SRC = P.ZH_SRC
 WORK = P.WORK
 WORK_TREE = P.WORK_TREE
-WORK_BACKUP = WORK / "backup"
+WORK_BACKUP = P.WORK_BACKUP
 
 BLOCK = 4 * 1024 * 1024
 
@@ -77,15 +81,18 @@ BLOCK = 4 * 1024 * 1024
 #   [32 字节哨兵][used(1)][version(1)][digest(32)]
 # 只改 Info.plist 的 hash 而不改这个摘要，Electron 会判定整张表无效并 FATAL
 # （archive.cc: "Failed to get integrity for validatable asar archive"）。
-INTEGRITY_SENTINEL = b"AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A"
-FRAMEWORK_BIN = (APP / "Contents" / "Frameworks" / "Electron Framework.framework"
+# 哨兵由 Electron 源码写死；Electron 换哨兵时可用环境变量覆盖：
+#   CLAUDE_ZH_SENTINEL=<32 字节 ASCII 或 64 位 hex>
+INTEGRITY_SENTINELS = [b"AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A"]
+FRAMEWORK_BIN = (P.FRAMEWORKS / "Electron Framework.framework"
                  / "Versions" / "A" / "Electron Framework")
 
-# 语言白名单数组（旧版/新版 bundle 里都是这个字面量）
-WHITELIST = ('["en-US","de-DE","fr-FR","ko-KR","ja-JP","es-419","es-ES",'
-             '"it-IT","hi-IN","pt-BR","id-ID"]')
-
-NAME_MAP_ANCHOR = '"en-US":{name:"English (United States)",localName:"English (United States)"}'
+# 语言白名单数组。不写死具体语言列表——Claude 增删语言后依然能命中；
+# 只要是以 "en-US" 开头、含 ≥5 个语言码的数组就认为是白名单。
+WHITELIST_RE = re.compile(
+    r'\["en-US"(?:\s*,\s*"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})?"){4,}\]')
+NAME_MAP_RE = re.compile(
+    r'"en-US"\s*:\s*\{name:"[^"]*",localName:"[^"]*"\}')
 NAME_MAP_ENTRY = '"%s":{name:"%s",localName:"%s"}' % (LANG, LANG_NAME, LANG_LOCAL)
 
 
@@ -291,12 +298,68 @@ def plist_integrity_dict() -> dict:
         return plistlib.load(f).get("ElectronAsarIntegrity", {}) or {}
 
 
-def read_framework_digest() -> tuple[int, int, str] | None:
-    d = FRAMEWORK_BIN.read_bytes()
-    i = d.find(INTEGRITY_SENTINEL)
-    if i < 0:
+def sentinels() -> list[bytes]:
+    """哨兵候选（默认一个；可用 CLAUDE_ZH_SENTINEL 覆盖，逗号分隔）。"""
+    env = os.environ.get("CLAUDE_ZH_SENTINEL")
+    if not env:
+        return INTEGRITY_SENTINELS
+    out = []
+    for part in env.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            b = bytes.fromhex(part)
+        except ValueError:
+            b = part.encode("utf-8")
+        if len(b) == 32:
+            out.append(b)
+    if not out:
+        print("  ⚠ CLAUDE_ZH_SENTINEL 无效（需 32 字节 ASCII 或 64 位 hex），已忽略")
+    return out or INTEGRITY_SENTINELS
+
+
+def mmap_find_first(path: Path, needle: bytes) -> int | None:
+    """在文件里搜索第一个匹配（mmap，不把几百 MB 的 Framework 读进内存）。"""
+    try:
+        with open(path, "rb") as f:
+            try:
+                m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            except (ValueError, OSError):
+                return None
+            try:
+                i = m.find(needle)
+                return i if i >= 0 else None
+            finally:
+                m.close()
+    except OSError:
         return None
-    return d[i + 32], d[i + 33], d[i + 34:i + 66].hex()
+
+
+def framework_targets() -> list[Path]:
+    """可能存放 __asar_integrity 段的 Mach-O 文件。"""
+    if FRAMEWORK_BIN.is_file():
+        return [FRAMEWORK_BIN]
+    # 布局变化时在 Frameworks 下按内容找
+    return [p for p in P.FRAMEWORKS.rglob("Electron Framework") if p.is_file()]
+
+
+def read_framework_digest() -> tuple[int, int, str] | None:
+    """读取第一个哨兵槽：(used, version, digest_hex)。"""
+    for path in framework_targets():
+        for sent in sentinels():
+            i = mmap_find_first(path, sent)
+            if i is None:
+                continue
+            try:
+                with open(path, "rb") as f:
+                    f.seek(i)
+                    blob = f.read(66)
+                if len(blob) >= 66:
+                    return blob[32], blob[33], blob[34:66].hex()
+            except OSError:
+                continue
+    return None
 
 
 def patch_framework_digest(new_digest: str) -> int:
@@ -304,25 +367,30 @@ def patch_framework_digest(new_digest: str) -> int:
 
     返回改写处数（该文件含 arm64 / x86_64 两份，通常 2 处）。
     """
-    if not FRAMEWORK_BIN.is_file():
-        # 有些版本把 framework 放在别处，退化为全盘搜索
-        return 0
-    data = bytearray(FRAMEWORK_BIN.read_bytes())
     want = bytes.fromhex(new_digest)
-    n, i = 0, 0
-    while True:
-        i = data.find(INTEGRITY_SENTINEL, i)
-        if i < 0:
-            break
-        data[i + 32] = 1          # used
-        data[i + 33] = 1          # version
-        data[i + 34:i + 66] = want
-        n += 1
-        i += 34 + len(want)
-    if n:
-        with open(FRAMEWORK_BIN, "wb") as f:
-            f.write(bytes(data))
-    return n
+    total = 0
+    for path in framework_targets():
+        try:
+            with open(path, "r+b") as f:
+                m = mmap.mmap(f.fileno(), 0)
+                try:
+                    for sent in sentinels():
+                        i = 0
+                        while True:
+                            i = m.find(sent, i)
+                            if i < 0:
+                                break
+                            m[i + 32] = 1          # used
+                            m[i + 33] = 1          # version
+                            m[i + 34:i + 66] = want
+                            total += 1
+                            i += 66
+                    m.flush()
+                finally:
+                    m.close()
+        except OSError as e:
+            print(f"  ⚠ 无法改写 {path.name}: {e}")
+    return total
 
 
 # ---------------------------------------------------------------- 重签
@@ -359,7 +427,7 @@ def sign_all() -> tuple[bool, str]:
     所以必须重签。ad-hoc 签名会改变应用身份，钥匙串里的旧条目可能要求重新授权
     （Electron safeStorage 会提示一次）。
     """
-    exe = APP / "Contents" / "MacOS" / APP.stem
+    exe = P.executable()
     for item in sign_targets():
         if item == exe:
             continue
@@ -379,19 +447,20 @@ def sign_all() -> tuple[bool, str]:
 
 
 def quit_claude():
-    if subprocess.run(["pgrep", "-x", "Claude"], capture_output=True).returncode != 0:
+    exe_name = P.executable().name
+    if subprocess.run(["pgrep", "-x", exe_name], capture_output=True).returncode != 0:
         return False
-    print("  正在退出 Claude ...")
-    subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+    print(f"  正在退出 {P.APP_NAME} ...")
+    subprocess.run(["osascript", "-e", f'tell application "{P.APP_NAME}" to quit'],
                    capture_output=True)
     time.sleep(2)
-    subprocess.run(["pkill", "-9", "-x", "Claude"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-x", exe_name], capture_output=True)
     time.sleep(1)
     return True
 
 
 def start_claude():
-    subprocess.run(["open", "-a", "Claude"], capture_output=True)
+    subprocess.run(["open", str(APP)], capture_output=True)
 
 
 # ---------------------------------------------------------------- sync
@@ -425,6 +494,19 @@ def cmd_sync(args):
     if not (WORK_BACKUP / "Info.plist.orig").exists():
         shutil.copy2(INFO_PLIST, WORK_BACKUP / "Info.plist.orig")
         print(f"✓ 原始 Info.plist 已备份 → {WORK_BACKUP / 'Info.plist.orig'}")
+
+    # 记录备份对应的版本（restore 时用来提示「备份不是当前版本」）
+    meta_path = WORK_BACKUP / "meta.json"
+    if not meta_path.exists():
+        meta = {
+            "app": str(APP),
+            "app_version": app_version(),
+            "layout": kind,
+            "asar_sha256": header_sha256(src) if kind == "asar" else None,
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
     return 0
 
 
@@ -479,22 +561,38 @@ def _assets_js():
 
 
 def inject_whitelist() -> int:
-    """把 zh-Hans 加进语言白名单数组。"""
-    total, files = 0, _assets_js()
-    new_arr = WHITELIST[:-1] + ',"%s"]' % LANG
-    for js in files:
+    """把 zh-Hans 加进语言白名单数组。
+
+    不依赖写死的语言列表：按「以 en-US 开头、≥5 个语言码」的数组字面量识别，
+    Claude 增删语言后仍然生效。
+    """
+    total = 0
+    for js in _assets_js():
         text = js.read_text(encoding="utf-8", errors="surrogateescape")
-        if WHITELIST not in text:
+        stats = {"seen": 0, "changed": 0}
+
+        def _sub(m):
+            try:
+                arr = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return m.group(0)
+            stats["seen"] += 1
+            if LANG in arr:
+                return m.group(0)
+            arr.append(LANG)
+            stats["changed"] += 1
+            return json.dumps(arr, separators=(",", ":"))
+
+        new_text = WHITELIST_RE.sub(_sub, text)
+        if not stats["seen"]:
             continue
-        if new_arr in text:
+        if stats["changed"]:
+            js.write_text(new_text, encoding="utf-8", errors="surrogateescape")
+            print(f"  ✓ {js.name}: 已注入 {LANG}（{stats['changed']} 处）")
+            total += stats["changed"]
+        else:
             print(f"  ✓ {js.name}: 白名单已含 {LANG}")
             total += 1
-            continue
-        n = text.count(WHITELIST)
-        js.write_text(text.replace(WHITELIST, new_arr),
-                      encoding="utf-8", errors="surrogateescape")
-        print(f"  ✓ {js.name}: 已注入 {LANG}（{n} 处）")
-        total += n
     if not total:
         print("  ⚠ 未找到语言白名单数组（bundle 结构可能又变了）")
     return total
@@ -506,10 +604,20 @@ def _name_map_injected(text: str) -> bool:
     注意：bundle 里还有一个「ISO 语言名 → 本地名」大表（已含 zh-Hans），
     不能拿全局搜索当依据，必须只看选择器映射表这一段。
     """
-    i = text.find(NAME_MAP_ANCHOR)
-    if i < 0:
+    m = NAME_MAP_RE.search(text)
+    if not m:
         return False
-    return f'"{LANG}":{{name:' in text[i:i + 900]
+    return f'"{LANG}":{{name:' in text[m.start():m.start() + 900]
+
+
+def _has_lang_whitelist(text: str) -> bool:
+    for m in WHITELIST_RE.finditer(text):
+        try:
+            if LANG in json.loads(m.group(0)):
+                return True
+        except json.JSONDecodeError:
+            continue
+    return False
 
 
 def inject_name_map() -> int:
@@ -517,14 +625,14 @@ def inject_name_map() -> int:
     total = 0
     for js in _assets_js():
         text = js.read_text(encoding="utf-8", errors="surrogateescape")
-        if NAME_MAP_ANCHOR not in text:
+        m = NAME_MAP_RE.search(text)
+        if not m:
             continue
         if _name_map_injected(text):
             print(f"  ✓ {js.name}: 名称映射已含 {LANG}")
             total += 1
             continue
-        new_text = text.replace(NAME_MAP_ANCHOR,
-                                NAME_MAP_ANCHOR + "," + NAME_MAP_ENTRY, 1)
+        new_text = text[:m.end()] + "," + NAME_MAP_ENTRY + text[m.end():]
         js.write_text(new_text, encoding="utf-8", errors="surrogateescape")
         print(f"  ✓ {js.name}: 已注入语言名称映射")
         total += 1
@@ -534,6 +642,23 @@ def inject_name_map() -> int:
 
 
 # ---------------------------------------------------------------- stage / pack
+
+def preflight_write():
+    """打包前检查：目标可写 + 磁盘够用（失败时给出可执行的处理方式）。"""
+    if not APP.is_dir():
+        raise SystemExit(f"✗ 找不到 {APP}\n  用 CLAUDE_ZH_APP 指定 Claude.app 路径")
+    if not P.writable([APP, RES]):
+        raise SystemExit(
+            f"✗ 没有写入权限: {APP}\n"
+            "  · 把 Claude 拖到 ~/Applications 后安装，或\n"
+            "  · 用管理员权限运行（sudo），或\n"
+            "  · 用 CLAUDE_ZH_APP 指向可写的副本。")
+    need = 600 * 1024 * 1024
+    free = shutil.disk_usage(RES).free
+    if free < need:
+        raise SystemExit(
+            f"✗ 磁盘空间不足: 需要约 {need // 2**20} MB，剩余 {free // 2**20} MB")
+
 
 def do_stage():
     print("\n[1/2] 部署中文翻译")
@@ -548,7 +673,10 @@ def cmd_stage(args):
     print(" Claude 中文化补丁 —— stage（只改工作树）")
     print(f" 目标: {RES}   版本: {app_version()}   布局: {P.layout()}")
     print("=" * 60)
-    cmd_sync(args)
+    if getattr(args, "no_sync", False) and WORK_TREE.is_dir():
+        print("· 跳过解包（--no-sync，沿用当前工作树）")
+    else:
+        cmd_sync(args)
     do_stage()
     return 0
 
@@ -558,6 +686,7 @@ def do_pack():
     if kind == "dir":
         print("\n  ⚠ 当前是松散目录布局，无需打包")
         return
+    preflight_write()
     print("\n重新打包 ion-dist.asar ...")
     quit_claude()
     tmp_out = WORK / "ion-dist.asar.new"
@@ -689,7 +818,7 @@ def cmd_verify(args):
             text = a.read(rel).decode("utf-8", "ignore")
         except Exception:
             continue
-        if '"id-ID","%s"]' % LANG in text:
+        if _has_lang_whitelist(text):
             wl += 1
         if _name_map_injected(text):
             nm += 1
@@ -711,9 +840,42 @@ def cmd_verify(args):
 # ---------------------------------------------------------------- restore
 
 def cmd_restore(args):
+    kind = P.layout()
+    if kind == "dir":
+        # 松散目录布局：删掉中文文件即可
+        quit_claude()
+        removed = 0
+        for f in (ION_DIR / "i18n" / f"{LANG}.json",
+                  ION_DIR / "i18n" / "dynamic" / f"{LANG}.json"):
+            if f.is_file():
+                f.unlink()
+                removed += 1
+                print(f"✓ 已删除 {f}")
+        ok, err = sign_all()
+        print("✓ 已重新签名" if ok else f"✗ 签名失败: {err}")
+        print("还原完成" + ("（没有中文文件可删）" if not removed else ""))
+        return 0
+
     bak = WORK_BACKUP / "ion-dist.asar.orig"
     if not bak.is_file():
-        raise SystemExit(f"✗ 没有备份文件: {bak}\n   先运行 python3 zh_patch.py sync")
+        raise SystemExit(
+            f"✗ 没有备份文件: {bak}\n"
+            "   先运行 python3 zh_patch.py sync（会把当前版本备份下来）")
+
+    # 备份与当前版本不一致时，还原会把旧版资源塞进新版 app，先拦住
+    meta_path = WORK_BACKUP / "meta.json"
+    if meta_path.is_file() and not getattr(args, "force", False):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        bak_ver, cur_ver = meta.get("app_version"), app_version()
+        if bak_ver and cur_ver != "?" and bak_ver != cur_ver:
+            raise SystemExit(
+                f"✗ 备份来自 Claude {bak_ver}，当前是 {cur_ver}。\n"
+                "  直接还原会把旧版本资源写进新版本 app，可能无法启动。\n"
+                "  确认要还原请加 --force。")
+
     quit_claude()
     shutil.copy2(bak, ION_ASAR)
     print(f"✓ 已还原 {ION_ASAR}")
@@ -763,9 +925,167 @@ def cmd_info(args):
     return 0
 
 
+# ---------------------------------------------------------------- status / doctor
+
+def _coverage_from_asar(a: Asar) -> dict:
+    try:
+        en = json.loads(a.read_text("i18n/en-US.json"))
+    except Exception:
+        return {}
+    zh_rel = f"i18n/{LANG}.json"
+    if not a.exists(zh_rel):
+        return {"total": len(en), "translated": 0,
+                "untranslated": len(en), "percent": 0.0}
+    try:
+        zh = json.loads(a.read_text(zh_rel))
+    except Exception:
+        return {}
+    same = sum(1 for k, v in en.items() if zh.get(k) == v)
+    total = len(en) or 1
+    return {
+        "total": len(en),
+        "translated": len(en) - same,
+        "untranslated": same,
+        "percent": round(100 * (len(en) - same) / total, 2),
+    }
+
+
+def _scan_injections(a: Asar) -> tuple[int, int]:
+    """统计语言白名单 / 名称映射已注入的 JS 文件数（较慢，深度检查时才做）。"""
+    wl = nm = 0
+    for rel, _ in a.list_files():
+        if not rel.startswith("assets/v1/") or not rel.endswith(".js"):
+            continue
+        try:
+            text = a.read(rel).decode("utf-8", "ignore")
+        except Exception:
+            continue
+        if _has_lang_whitelist(text):
+            wl += 1
+        if _name_map_injected(text):
+            nm += 1
+    return wl, nm
+
+
+def collect_status(deep: bool = False) -> dict:
+    """GUI / doctor 用的结构化状态（只读，不改动 app）。"""
+    d = P.describe()
+    patch = {
+        "applied": False,
+        "zh_deployed": False,
+        "dynamic_zh_deployed": False,
+        "header_hash_ok": None,
+        "integrity_digest_ok": None,
+        "whitelist_files": None,
+        "name_map_files": None,
+    }
+    d["patch"] = patch
+
+    kind = d.get("layout")
+    if not kind:
+        d["llm"] = _llm_status()
+        return d
+
+    if kind == "asar":
+        try:
+            a = Asar(ION_ASAR)
+            d["asar_files"] = len(a.list_files())
+            patch["zh_deployed"] = a.exists(f"i18n/{LANG}.json")
+            patch["dynamic_zh_deployed"] = a.exists(f"i18n/dynamic/{LANG}.json")
+            patch["applied"] = patch["zh_deployed"]
+            patch["header_hash_ok"] = header_sha256(ION_ASAR) == plist_asar_hash()
+            want = integrity_digest(plist_integrity_dict())
+            cur = read_framework_digest()
+            patch["integrity_digest_ok"] = (
+                None if cur is None else (cur[0] == 1 and cur[2] == want))
+            d["coverage"] = _coverage_from_asar(a)
+            if deep:
+                wl, nm = _scan_injections(a)
+                patch["whitelist_files"], patch["name_map_files"] = wl, nm
+        except Exception as e:
+            d["error"] = f"{type(e).__name__}: {e}"
+    else:
+        patch["zh_deployed"] = (ION_DIR / "i18n" / f"{LANG}.json").is_file()
+        patch["dynamic_zh_deployed"] = (
+            ION_DIR / "i18n" / "dynamic" / f"{LANG}.json").is_file()
+        patch["applied"] = patch["zh_deployed"]
+
+    d["llm"] = _llm_status()
+    return d
+
+
+def _llm_status() -> dict:
+    try:
+        import llm_endpoint
+        base, model = llm_endpoint.discover()
+        return {"available": True, "base": base, "model": model}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+
+def cmd_status(args):
+    print(json.dumps(collect_status(deep=args.deep), ensure_ascii=False, indent=2))
+    return 0
+
+
+def doctor_checks() -> list[dict]:
+    """环境体检项：每一项给出 ok / 说明 / 修复建议。"""
+    status = collect_status(deep=True)
+    checks = []
+
+    def add(name, ok, detail="", hint=""):
+        checks.append({"name": name, "ok": ok, "detail": detail, "hint": hint})
+
+    add("macOS", status["macos"], f"{sys.platform}")
+    add("Python ≥ 3.10", status["python_ok"], status["python"],
+        "brew install python@3.13")
+    add("codesign", status["codesign"], shutil.which("codesign") or "",
+        "xcode-select --install")
+    add("Claude.app", status["app_exists"], status["app"],
+        "用 CLAUDE_ZH_APP=/path/to/Claude.app 指定")
+    add("写入权限", status["writable"], "app 目录可写" if status["writable"] else "不可写",
+        "把 Claude 移到 ~/Applications 或用管理员权限运行")
+    add("前端布局", bool(status["layout"]), str(status["layout"]),
+        "确认 Claude 版本；旧版为 dir，新版为 asar")
+    add("翻译源", status["translation_entries"] > 0,
+        f"{status['translation_entries']} 条", "检查 zh-Hans-final.json 是否存在")
+    add("工作树", status["work_tree"], status["work"],
+        "运行 python3 zh_patch.py sync")
+    sentinel = read_framework_digest() is not None
+    add("Electron integrity 槽", sentinel,
+        "已找到" if sentinel else "未找到（旧版 Electron 可能不需要）",
+        "版本过新时可用 CLAUDE_ZH_SENTINEL 覆盖哨兵")
+    llm = status.get("llm") or {}
+    add("本地 LLM 端点", bool(llm.get("available")),
+        llm.get("model", "") if llm.get("available") else "未探测到",
+        "设置 CLAUDE_ZH_API / CLAUDE_ZH_MODEL 指向任意 OpenAI 兼容端点")
+    return checks
+
+
+def cmd_doctor(args):
+    checks = doctor_checks()
+    if args.json:
+        print(json.dumps({"checks": checks}, ensure_ascii=False, indent=2))
+        return 0
+    print("=" * 64)
+    print(" 环境体检")
+    print("=" * 64)
+    for c in checks:
+        mark = "✓" if c["ok"] else "✗"
+        print(f"  {mark} {c['name']:<22} {c['detail']}")
+        if not c["ok"] and c["hint"]:
+            print(f"    → {c['hint']}")
+    hard = [c for c in checks if c["name"] in
+            {"macOS", "Python ≥ 3.10", "codesign", "Claude.app", "写入权限", "前端布局"}]
+    ok = all(c["ok"] for c in hard)
+    print("\n" + ("✓ 环境可用" if ok else "✗ 存在阻塞项，按上面提示处理后重试"))
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------- main
 
 def main():
+    P.require_env()
     ap = argparse.ArgumentParser(description="Claude Desktop 中文化补丁（asar 版）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -773,6 +1093,8 @@ def main():
     s.set_defaults(func=cmd_sync)
 
     t = sub.add_parser("stage", help="部署翻译并注入（不打包）")
+    t.add_argument("--no-sync", action="store_true",
+                   help="工作树已是最新时跳过解包")
     t.set_defaults(func=cmd_stage)
 
     k = sub.add_parser("pack", help="工作树 → asar，并更新 Info.plist")
@@ -785,10 +1107,20 @@ def main():
     v.set_defaults(func=cmd_verify)
 
     r = sub.add_parser("restore", help="还原官方原版")
+    r.add_argument("--force", action="store_true",
+                   help="备份版本与当前版本不一致时仍然还原")
     r.set_defaults(func=cmd_restore)
 
     i = sub.add_parser("info", help="打印环境信息")
     i.set_defaults(func=cmd_info)
+
+    st = sub.add_parser("status", help="输出 JSON 状态（供 GUI 使用）")
+    st.add_argument("--deep", action="store_true", help="额外扫描语言注入（较慢）")
+    st.set_defaults(func=cmd_status)
+
+    d = sub.add_parser("doctor", help="环境体检")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     return args.func(args)

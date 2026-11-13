@@ -3,6 +3,46 @@
 为 Mac 版 Claude Desktop（4.42xx 起，前端打包成 `ion-dist.asar`）添加简体中文界面，
 含完整中文翻译质量工具链。
 
+![图形界面](docs/screenshot.jpg)
+
+## 环境要求
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| 系统 | **macOS** | 依赖 `codesign` / `Info.plist` / asar 校验，暂无其他平台实现 |
+| Python | **≥ 3.10** | 系统自带 3.9 会直接语法报错；`brew install python@3.13` |
+| 命令行工具 | Xcode CLT | `xcode-select --install`，提供 `codesign` |
+| 权限 | 对 `Claude.app` 可写 | 用户自己安装的即可；root 属主时用 sudo 或装到 `~/Applications` |
+| 可选 | OpenAI 兼容端点 | 仅 LLM 补译需要；没有会自动跳过，不影响应用汉化 |
+| 可选 | Flutter ≥ 3.27 | 只在需要编译图形界面时需要 |
+
+环境不满足时各入口都会给出明确的修复提示，也可以随时跑 `python3 zh_patch.py doctor` 体检。
+
+### 换机器 / 换安装位置
+
+代码里没有写死用户名或工程路径（工程目录由脚本位置推断），所有本机差异都能用环境变量覆盖：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CLAUDE_ZH_APP` | 自动探测 `/Applications`、`~/Applications`，再问 Spotlight | Claude.app 路径 |
+| `CLAUDE_ZH_WORK` | `<工程目录>/.work` | 解包工作树 |
+| `CLAUDE_ZH_PROJECT` | 由工程位置推断 | GUI 启动时查找的工程目录 |
+| `CLAUDE_ZH_API` | 自动探测本地端口 | OpenAI 兼容 base URL（`…/v1`）或完整 URL |
+| `CLAUDE_ZH_MODEL` | 从 `/v1/models` 自动挑 | 模型名 |
+| `CLAUDE_ZH_KEY` | 空 | 需要鉴权时的 Bearer token |
+| `CLAUDE_ZH_PORTS` | 内置常见端口 | 探测端口列表，如 `1234,8080` |
+| `CLAUDE_ZH_PROBE_TIMEOUT` | `0.6` | 单端口探测超时（秒） |
+| `CLAUDE_ZH_SENTINEL` | 内置 Electron 哨兵 | Electron 升版改了哨兵时覆盖（32 字节 ASCII 或 64 位 hex） |
+| `PYTHON` | `python3` | `update.sh` 使用的解释器 |
+
+```bash
+# 例子：Claude 装在别处、模型端点也在别处
+CLAUDE_ZH_APP=~/Applications/Claude.app \
+CLAUDE_ZH_API=http://127.0.0.1:1234/v1 \
+CLAUDE_ZH_MODEL=qwen2.5-7b-instruct \
+./update.sh
+```
+
 ## 工作原理（新版）
 
 Claude 4.42xx 起把前端资源从松散目录 `Resources/ion-dist/` 收进了
@@ -29,12 +69,15 @@ Claude 4.42xx 起把前端资源从松散目录 `Resources/ion-dist/` 收进了
 
 **Claude 每次升级（含小版本）都会完整覆盖 `ion-dist.asar`，汉化必然失效。**
 
-升级后运行：
+升级后运行（在工程目录里）：
 
 ```bash
-cd ~/claude-zh-patch && ./update.sh          # 完整更新（应用 + 补译新增文案）
-cd ~/claude-zh-patch && ./update.sh --quick  # 快速（只应用，不调 LLM）
+./update.sh              # 完整更新（应用 + 补译新增文案）
+./update.sh --quick      # 快速（只应用，不调 LLM）
+./update.sh --no-restart # 不自动重启 Claude（自动化 / GUI 用）
 ```
+
+也可以直接用图形界面点「一键汉化」（见下方 GUI 一节）。
 
 `update.sh` 会自动完成：
 1. `zh_patch.py sync` — 解包当前版本 `ion-dist.asar` 到 `.work/`（首次会备份原版 asar / Info.plist）
@@ -55,7 +98,9 @@ python3 zh_patch.py stage       # 只部署翻译+注入（不打包）
 python3 zh_patch.py pack        # 工作树 → asar + 更新校验值 + 重签
 python3 zh_patch.py apply       # sync + stage + pack
 python3 zh_patch.py verify      # 校验 integrity / 头部 hash / 整表摘要 / 中文文件 / 覆盖率
-python3 zh_patch.py restore     # 还原官方原版（含重签）
+python3 zh_patch.py restore     # 还原官方原版（含重签；版本不一致需 --force）
+python3 zh_patch.py doctor      # 环境体检（macOS / Python / 权限 / 布局 / 模型端点）
+python3 zh_patch.py status      # JSON 状态，供 GUI 读取
 
 ./apply.sh                      # = zh_patch.py apply
 ./restore.sh                    # = zh_patch.py restore
@@ -78,6 +123,8 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 | 文件 | 作用 |
 |---|---|
 | `zh_patch.py` | **补丁引擎**：asar 读写、integrity 摘要、重签、sync/stage/pack/verify/restore |
+| `gui/` | **图形界面**：Flutter macOS 应用（ClaudeHans.app） |
+| `docs/screenshot.jpg` | 界面截图 |
 | `claude_paths.py` | 新旧布局统一路径解析（供所有工具复用） |
 | `apply.sh` / `restore.sh` | `zh_patch.py apply/restore` 的入口 |
 | `update.sh` | **升级后一键更新（推荐）** |
@@ -90,7 +137,7 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 | `propagate.py` | 同值传播补译 |
 | `retranslate.py` | LLM 普通文案重译 |
 | `retranslate_icu.py` | ICU 结构重译 |
-| `.work/` | 解包后的工作树 + 原版 asar / Info.plist 备份（还原用） |
+| `.work/` | 解包后的工作树 + 原版 asar / Info.plist 备份（还原用，不入库） |
 | `backup/` | 旧版（松散目录时代）备份，已不再使用 |
 
 ## 关键技术点
@@ -102,11 +149,41 @@ python3 llm_endpoint.py         # 查看当前探测到的模型端点
 | **Electron 44 的整表摘要** | 重算整张 `ElectronAsarIntegrity` 字典的 SHA256（按 key 排序拼接 key+algorithm+hash），写回 Framework 的 `__asar_integrity` 段 |
 | **改资源后签名失效 → 无法启动** | 从内到外 ad-hoc 重签（嵌套 Mach-O / bundle 先签，外层最后），并清除 quarantine |
 | **升级后 JS 文件名哈希变化** | 按内容特征（语言数组字面量 / 名称映射锚点）动态定位，不写死文件名 |
+| **bundle 结构小改** | 语言白名单按「以 en-US 开头、≥5 个语言码」的数组正则定位，名称映射同理，不再写死具体语言列表 |
+| **Framework 体积数百 MB** | 用 `mmap` 搜索并原地改写 integrity 哨兵，不把整个二进制读进内存 |
+| **换机器 / 换安装位置** | 路径全部可覆盖 + 自动探测；`doctor` 一次性检查系统、Python、权限、布局、端点 |
 | **本地模型端口经常变** | `llm_endpoint.py` 自动扫描常见端口 + 模型候选；也可用 `CLAUDE_ZH_API` / `CLAUDE_ZH_MODEL` 指定 |
 | **ICU 结构易被破坏** | `retranslate_icu.py` 深度感知解析，校验变量集合 / 分支键 / `#` 数量 / HTML 标签 |
 | **中文语序导致变量顺序变化** | 校验用「集合比较」而非「顺序比较」 |
 | **同名文案多个 key** | `propagate.py` 按英文原文传播 + `fill_short.py` 词典兜底 |
 | **新增 key 过多** | LLM 分批重译 + 断点续传（`translate_done.json` / `icu_done.json`） |
+
+## 图形界面（Flutter）
+
+`gui/` 是 macOS 桌面的 Flutter 应用，把常用流程做成按钮，带实时输出：
+
+![界面](docs/screenshot.jpg)
+
+- **状态总览**：Claude 版本、前端布局、汉化状态、integrity 校验、翻译覆盖率、工作树、模型端点
+- **一键汉化**：`update.sh --quick`（解包 → 部署 → 注入 → 打包 → 重签 → 重启）
+- **完整更新**：`update.sh`（额外跑 LLM 补译）
+- **校验补丁**：`zh_patch.py verify`
+- **环境体检**：`zh_patch.py doctor`
+- **还原原版**：`zh_patch.py restore`
+- **设置**：Claude.app / 工程目录 / Python 解释器 / LLM 端点，保存在 `~/.config/claude-zh-patch/gui.json`
+
+GUI 只是把命令包装成子进程，行为与命令行完全一致。首次启动会自动定位工程目录
+（从当前目录逐级向上、`~/claude-zh-patch` 等位置查找），并用登录 shell 解析可用的 Python。
+
+```bash
+cd gui
+flutter run -d macos     # 开发运行
+flutter build macos      # 打包 → build/macos/Build/Products/Release/ClaudeHans.app
+flutter test             # 单元测试（命令执行 / 状态解析 / 配置序列化）
+```
+
+> 为了能调用 python 与读写 `/Applications/Claude.app`，runner 关闭了 App Sandbox
+> （`macos/Runner/*.entitlements`），这是此类本地工具的标准做法。
 
 ## 注意事项
 

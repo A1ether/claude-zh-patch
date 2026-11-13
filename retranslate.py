@@ -21,7 +21,7 @@ EN_FILE = P.require_en()
 QUEUE = PATCH_DIR / "translate_queue.json"
 DONE = PATCH_DIR / "translate_done.json"
 
-from llm_endpoint import discover as _discover
+from llm_endpoint import auth_headers, discover as _discover
 try:
     API, MODEL = _discover()  # 自动探测可用本地端点
 except RuntimeError as e:
@@ -155,7 +155,8 @@ def call_llm(batch: list) -> dict:
         "response_format": {"type": "json_object"},
     }
     req = urllib.request.Request(
-        API, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        API, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **auth_headers()})
     with urllib.request.urlopen(req, timeout=180) as r:
         body = json.load(r)
     content = body["choices"][0]["message"]["content"].strip()
